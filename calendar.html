@@ -218,7 +218,11 @@
 
     /* Calendar view */
     .months-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(285px,1fr)); gap: 16px; }
-    .month-card   { background: #fff; border: 1px solid var(--line); border-radius: 18px; overflow: hidden; box-shadow: 0 2px 12px rgba(15,23,42,.04); }
+    .month-card   { background: #fff; border: 1px solid var(--line); border-radius: 18px; overflow: hidden; box-shadow: 0 2px 12px rgba(15,23,42,.04); scroll-margin-top: 110px; }
+    /* Next-year spillover preview cards */
+    .month-card.spill { border-style: dashed; background: #fcfdff; }
+    .month-card.spill .month-header { background: #f4f8ff; color: var(--brand2); }
+    .spill-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; font-weight: 800; color: #fff; background: var(--brand2); border-radius: 999px; padding: 2px 7px; margin-left: 6px; vertical-align: 1px; }
     .month-header { padding: 12px 14px; background: #fff; border-bottom: 1px solid var(--line); font-weight: 850; color: var(--brand); display: flex; justify-content: space-between; }
     .month-count  { font-size: 12px; color: var(--muted); font-weight: 750; }
     .day-grid     { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; padding: 10px; }
@@ -469,11 +473,21 @@
 
   // ── Initialise after data loads ───────────────────────────────────
   function init() {
-    selectedCities = new Set([...new Set(HOLIDAYS.map(h => h.city))]);
+    selectedCities = new Set();   // start with no cities selected
     cityCountry    = Object.fromEntries(HOLIDAYS.map(h => [h.city, COUNTRIES[h.country] || 'XX']));
     setType(selectedType);
     renderCities();
     render();
+    scrollToCurrentMonth();       // land on the current month on load
+  }
+
+  // Position the calendar on the current month so the user lands on "today"
+  // without having to scroll to find it.
+  function scrollToCurrentMonth() {
+    requestAnimationFrame(() => {
+      const cur = $('currentMonth');
+      if (cur) cur.scrollIntoView({ block: 'start' });
+    });
   }
 
   // ── Type chip selector ────────────────────────────────────────────
@@ -559,10 +573,10 @@
   }
 
   // ── Data helpers ──────────────────────────────────────────────────
-  function filtered() {
+  function filtered(year = selectedYear) {
     const q = $('searchBox').value.trim().toLowerCase();
     return HOLIDAYS.filter(h =>
-      h.year === selectedYear &&
+      h.year === year &&
       selectedCities.has(h.city) &&
       (selectedType === 'all' || h.category === selectedType) &&
       (!q || [h.city, h.country, h.name_en, h.name_local, h.type, h.notes, h.category]
@@ -614,50 +628,67 @@
 
   // ── Calendar view ─────────────────────────────────────────────────
   function calendar(ds) {
-    const by   = {};
+    // Merge the selected year with the first months of the next year so the
+    // spillover preview shows holidays too (date keys are unique across years).
+    const nextYear = selectedYear + 1;
+    const nextDs   = dedupe(filtered(nextYear));
+
+    const by = {};
     ds.forEach(h => (by[h.date] ??= []).push(h));
+    nextDs.forEach(h => (by[h.date] ??= []).push(h));
 
     const grid = $('viewCalendar');
     grid.innerHTML = '';
 
-    for (let m = 0; m < 12; m++) {
-      const count = Object.keys(by).filter(d => +d.slice(5,7) === m + 1).length;
-      const card  = document.createElement('section');
-      card.className = 'month-card';
-      card.innerHTML = `
-        <div class="month-header">
-          <span>${MONTHS[m]} ${selectedYear}</span>
-          <span class="month-count">${count || ''}</span>
-        </div>
-        <div class="day-grid"></div>`;
+    // Full selected year …
+    for (let m = 0; m < 12; m++) monthCard(grid, selectedYear, m, by, false);
+    // … then the first 3 months of the next year, so the user doesn't have to
+    // look in two places at the turn of the year.
+    for (let m = 0; m < 3;  m++) monthCard(grid, nextYear,     m, by, true);
+  }
 
-      const dg = card.querySelector('.day-grid');
-      DAYSHORT.forEach(d => dg.insertAdjacentHTML('beforeend', `<div class="day-name">${d}</div>`));
+  function monthCard(grid, year, m, by, spill) {
+    const count = Object.keys(by)
+      .filter(d => +d.slice(0,4) === year && +d.slice(5,7) === m + 1).length;
 
-      const first = new Date(selectedYear, m, 1).getDay();
-      const off   = first === 0 ? 6 : first - 1;
-      for (let i = 0; i < off; i++) dg.insertAdjacentHTML('beforeend', '<div class="day muted"></div>');
+    const today     = new Date();
+    const isCurrent = today.getFullYear() === year && today.getMonth() === m;
 
-      const days  = new Date(selectedYear, m + 1, 0).getDate();
-      const today = new Date();
-      for (let d = 1; d <= days; d++) {
-        const s   = `${selectedYear}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-        const hol = by[s] || [];
-        const el  = document.createElement('div');
-        const dow = new Date(selectedYear, m, d).getDay();
-        const isToday = today.getFullYear() === selectedYear && today.getMonth() === m && today.getDate() === d;
-        el.className = `day ${dow === 0 || dow === 6 ? 'weekend' : ''} ${hol.length ? 'has' : ''} ${isToday ? 'today' : ''}`;
-        el.innerHTML = `<div class="num">${d}</div>` +
-          (hol.length ? `<div class="dots">${hol.map(h => `<span class="dot ${h.category}"></span>`).join('')}</div>` : '');
-        if (hol.length) {
-          el.onmouseenter = e => showTip(e, s, hol);
-          el.onmousemove  = moveTip;
-          el.onmouseleave = hideTip;
-        }
-        dg.appendChild(el);
+    const card = document.createElement('section');
+    card.className = 'month-card' + (spill ? ' spill' : '');
+    if (isCurrent) card.id = 'currentMonth';
+    card.innerHTML = `
+      <div class="month-header">
+        <span>${MONTHS[m]} ${year}${spill ? ' <span class="spill-tag">next year</span>' : ''}</span>
+        <span class="month-count">${count || ''}</span>
+      </div>
+      <div class="day-grid"></div>`;
+
+    const dg = card.querySelector('.day-grid');
+    DAYSHORT.forEach(d => dg.insertAdjacentHTML('beforeend', `<div class="day-name">${d}</div>`));
+
+    const first = new Date(year, m, 1).getDay();
+    const off   = first === 0 ? 6 : first - 1;
+    for (let i = 0; i < off; i++) dg.insertAdjacentHTML('beforeend', '<div class="day muted"></div>');
+
+    const days = new Date(year, m + 1, 0).getDate();
+    for (let d = 1; d <= days; d++) {
+      const s   = `${year}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const hol = by[s] || [];
+      const el  = document.createElement('div');
+      const dow = new Date(year, m, d).getDay();
+      const isToday = today.getFullYear() === year && today.getMonth() === m && today.getDate() === d;
+      el.className = `day ${dow === 0 || dow === 6 ? 'weekend' : ''} ${hol.length ? 'has' : ''} ${isToday ? 'today' : ''}`;
+      el.innerHTML = `<div class="num">${d}</div>` +
+        (hol.length ? `<div class="dots">${hol.map(h => `<span class="dot ${h.category}"></span>`).join('')}</div>` : '');
+      if (hol.length) {
+        el.onmouseenter = e => showTip(e, s, hol);
+        el.onmousemove  = moveTip;
+        el.onmouseleave = hideTip;
       }
-      grid.appendChild(card);
+      dg.appendChild(el);
     }
+    grid.appendChild(card);
   }
 
   // ── List views ────────────────────────────────────────────────────
