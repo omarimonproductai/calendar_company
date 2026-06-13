@@ -472,21 +472,90 @@
   }
 
   // ── Initialise after data loads ───────────────────────────────────
-  function init() {
-    selectedCities = new Set();   // start with no cities selected
-    cityCountry    = Object.fromEntries(HOLIDAYS.map(h => [h.city, COUNTRIES[h.country] || 'XX']));
-    setType(selectedType);
-    renderCities();
-    render();
-    scrollToCurrentMonth();       // land on the current month on load
+  // ── Persisted city selection ──────────────────────────────────────
+  const CITY_STORAGE_KEY = 'cooltra.selectedCities';
+
+  function persistCities() {
+    try { localStorage.setItem(CITY_STORAGE_KEY, JSON.stringify([...selectedCities])); } catch (e) {}
+  }
+  function loadSavedCities() {
+    try { const v = localStorage.getItem(CITY_STORAGE_KEY); return v ? JSON.parse(v) : null; }
+    catch (e) { return null; }
   }
 
-  // Position the calendar on the current month so the user lands on "today"
-  // without having to scroll to find it.
-  function scrollToCurrentMonth() {
+  // Approx. coordinates for every available city, used to pick the closest
+  // one to the user when nothing has been selected yet.
+  const CITY_COORDS = {
+    Amsterdam:[52.3676,4.9041], Delft:[52.0116,4.3571], 'Den Haag':[52.0705,4.3007],
+    Eindhoven:[51.4416,5.4697], Haarlem:[52.3874,4.6462], Nijmegen:[51.8126,5.8372],
+    Rotterdam:[51.9244,4.4777], Antwerp:[51.2194,4.4025], Bruxelles:[50.8503,4.3517],
+    Barcelona:[41.3851,2.1734], Madrid:[40.4168,-3.7038], Sevilla:[37.3891,-5.9845],
+    Valencia:[39.4699,-0.3763], Lisboa:[38.7223,-9.1393], Milano:[45.4642,9.19],
+    Roma:[41.9028,12.4964], Torino:[45.0703,7.6869], Paris:[48.8566,2.3522]
+  };
+
+  function nearestCity(lat, lon) {
+    let best = null, bestD = Infinity;
+    visibleCities().forEach(city => {
+      const c = CITY_COORDS[city];
+      if (!c) return;
+      const dLat = c[0] - lat, dLon = (c[1] - lon) * Math.cos(lat * Math.PI / 180);
+      const d = dLat * dLat + dLon * dLon;   // squared distance is enough for ranking
+      if (d < bestD) { bestD = d; best = city; }
+    });
+    return best;
+  }
+
+  // When nothing is selected, select the city closest to the user (if we can
+  // read their location); otherwise fall back to selecting everything.
+  function selectNearestCity() {
+    const done = city => {
+      if (city) selectedCities = new Set([city]);
+      else      visibleCities().forEach(c => selectedCities.add(c));
+      renderCities();
+      render();
+      scrollToToday();
+    };
+    if (!navigator.geolocation) { done(null); return; }
+    navigator.geolocation.getCurrentPosition(
+      pos => done(nearestCity(pos.coords.latitude, pos.coords.longitude)),
+      ()  => done(null),
+      { timeout: 8000, maximumAge: 600000 }
+    );
+  }
+
+  // ── Initialise after data loads ───────────────────────────────────
+  function init() {
+    cityCountry = Object.fromEntries(HOLIDAYS.map(h => [h.city, COUNTRIES[h.country] || 'XX']));
+    setType(selectedType);
+
+    // (1) Restore the last selection the user made, if any.
+    const saved = loadSavedCities();
+    selectedCities = new Set((saved || []).filter(c => cityCountry[c]));
+
+    renderCities();
+    render();
+    scrollToToday();
+
+    // (2) Nothing selected → show the city closest to the user.
+    if (selectedCities.size === 0) selectNearestCity();
+  }
+
+  // Auto-position the active view on "today": the current month in the
+  // calendar, or the first holiday on/after today in the list views.
+  function scrollToToday() {
     requestAnimationFrame(() => {
-      const cur = $('currentMonth');
-      if (cur) cur.scrollIntoView({ block: 'start' });
+      if (currentView === 'calendar') {
+        const cur = $('currentMonth');
+        if (cur) cur.scrollIntoView({ block: 'start' });
+        return;
+      }
+      const t = new Date();
+      const todayISO = `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`;
+      const container = currentView === 'bydate' ? $('viewByDate') : $('viewByCity');
+      const rows = container ? [...container.querySelectorAll('tr[data-d]')] : [];
+      const target = rows.find(r => r.dataset.d >= todayISO) || rows[0];
+      if (target) target.scrollIntoView({ block: 'center' });
     });
   }
 
@@ -528,6 +597,7 @@
       btn.onclick = () => {
         if (sel === cities.length) cities.forEach(c => selectedCities.delete(c));
         else                       cities.forEach(c => selectedCities.add(c));
+        persistCities();
         renderCities();
         render();
       };
@@ -540,6 +610,7 @@
         b.textContent = city;
         b.onclick = () => {
           selectedCities.has(city) ? selectedCities.delete(city) : selectedCities.add(city);
+          persistCities();
           renderCities();
           render();
         };
@@ -554,8 +625,8 @@
     $('cityNoneBtn').classList.toggle('active', selectedCities.size === 0);
   }
 
-  function selectAllVisible() { visibleCities().forEach(c => selectedCities.add(c)); renderCities(); render(); }
-  function clearCities()       { selectedCities.clear(); renderCities(); render(); }
+  function selectAllVisible() { visibleCities().forEach(c => selectedCities.add(c)); persistCities(); renderCities(); render(); }
+  function clearCities()       { selectedCities.clear(); persistCities(); renderCities(); render(); }
 
   // ── Year / view switching ─────────────────────────────────────────
   function setYear(y) {
@@ -570,6 +641,7 @@
     $('viewByDate'  ).style.display = v === 'bydate'   ? 'grid' : 'none';
     $('viewByCity'  ).style.display = v === 'bycity'   ? 'grid' : 'none';
     render();
+    scrollToToday();   // jump to today in whichever view we switched to
   }
 
   // ── Data helpers ──────────────────────────────────────────────────
@@ -642,9 +714,9 @@
 
     // Full selected year …
     for (let m = 0; m < 12; m++) monthCard(grid, selectedYear, m, by, false);
-    // … then the first 3 months of the next year, so the user doesn't have to
+    // … then the first 4 months of the next year, so the user doesn't have to
     // look in two places at the turn of the year.
-    for (let m = 0; m < 3;  m++) monthCard(grid, nextYear,     m, by, true);
+    for (let m = 0; m < 4;  m++) monthCard(grid, nextYear,     m, by, true);
   }
 
   function monthCard(grid, year, m, by, spill) {
@@ -729,7 +801,7 @@
       const cityCells = showCity
         ? `<td>${esc(h.city)}</td><td class="hide-sm">${flag(cc)}${esc(h.country)}</td>`
         : '';
-      return `<tr>
+      return `<tr data-d="${h.date}">
         <td class="date">${h.date}${isWeekend(h.date) ? ' ⚠' : ''}</td>
         <td class="muted">${DAYS[d.getDay()]}</td>
         ${cityCells}
